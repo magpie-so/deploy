@@ -1,0 +1,237 @@
+# ============================================
+# Magpie AI — Production Deployment
+# ============================================
+# Runs all services: backend API, frontend, worker, LLM, DB, cache, proxy
+# Usage: ./setup.sh (first time) or docker compose up -d
+# Config: copy .env.example to .env and fill in values
+
+services:
+  # PostgreSQL Database
+  postgres:
+    image: postgres:15-alpine
+    container_name: magpie-postgres
+    restart: unless-stopped
+    command: >
+      postgres
+      -c max_connections=200
+      -c shared_buffers=256MB
+      -c work_mem=4MB
+      -c effective_cache_size=512MB
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-magpie}
+      POSTGRES_USER: ${POSTGRES_USER:-magpie}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      PGDATA: /var/lib/postgresql/data/pgdata
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-magpie}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - magpie-network
+
+  # Redis (broker + cache)
+  redis:
+    image: redis:7-alpine
+    container_name: magpie-redis
+    restart: unless-stopped
+    command: redis-server --appendonly yes --maxmemory 2gb --maxmemory-policy allkeys-lru --requirepass ${REDIS_PASSWORD}
+    volumes:
+      - redis_data:/data
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - magpie-network
+
+  # vLLM Inference Server (GPU-enabled)
+  llm:
+    build:
+      context: ./llm
+      dockerfile: Dockerfile
+      args:
+        VLLM_MODEL: ${VLLM_MODEL:-qwen3-1.7b}
+    container_name: magpie-llm
+    restart: unless-stopped
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    environment:
+      - CUDA_VISIBLE_DEVICES=0
+      - HF_HOME=/models/.cache
+    volumes:
+      - model_cache:/models/.cache
+    expose:
+      - "1234"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:1234/v1/models"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 120s
+    networks:
+      - magpie-network
+    stop_grace_period: 30s
+
+  # FastAPI Backend
+  api:
+    image: ghcr.io/magpie-so/product/backend:${MAGPIE_VERSION:-latest}
+    container_name: magpie-api
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-magpie}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-magpie}
+      - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379/0
+      - VLLM_URL=http://llm:1234
+      - VLLM_MODEL=${VLLM_MODEL:-qwen3-1.7b}
+      - SECRET_KEY=${SECRET_KEY}
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY}
+      - JWT_ALGORITHM=HS256
+      - ACCESS_TOKEN_EXPIRE_MINUTES=30
+      - ENVIRONMENT=production
+      - DEBUG=False
+      - ALLOWED_ORIGINS=${ALLOWED_ORIGINS}
+      - ADMIN_EMAIL=${ADMIN_EMAIL:-admin@magpie.local}
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD}
+      - MAGPIE_LICENSE_KEY=${MAGPIE_LICENSE_KEY}
+      - MAGPIE_LICENSE_SERVER=${MAGPIE_LICENSE_SERVER}
+    volumes:
+      - app_data:/app/data
+    expose:
+      - "8000"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    networks:
+      - magpie-network
+    stop_grace_period: 30s
+
+  # Celery Worker (async tasks)
+  worker:
+    image: ghcr.io/magpie-so/product/backend:${MAGPIE_VERSION:-latest}
+    container_name: magpie-worker
+    restart: unless-stopped
+    command: celery -A src.tasks.celery_app worker --loglevel=info --concurrency=8
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-magpie}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-magpie}
+      - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379/0
+      - CELERY_BROKER_URL=redis://:${REDIS_PASSWORD}@redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://:${REDIS_PASSWORD}@redis:6379/0
+      - VLLM_URL=http://llm:1234
+      - VLLM_MODEL=${VLLM_MODEL:-qwen3-1.7b}
+      - SECRET_KEY=${SECRET_KEY}
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY}
+      - ENVIRONMENT=production
+      - DEBUG=False
+      - MAGPIE_LICENSE_KEY=${MAGPIE_LICENSE_KEY}
+      - MAGPIE_LICENSE_SERVER=${MAGPIE_LICENSE_SERVER}
+    volumes:
+      - app_data:/app/data
+    networks:
+      - magpie-network
+    stop_grace_period: 60s
+
+  # Celery Beat (periodic tasks — license heartbeat)
+  beat:
+    image: ghcr.io/magpie-so/product/backend:${MAGPIE_VERSION:-latest}
+    container_name: magpie-beat
+    restart: unless-stopped
+    command: celery -A src.tasks.celery_app beat --loglevel=info
+    depends_on:
+      redis:
+        condition: service_healthy
+    environment:
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-magpie}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-magpie}
+      - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379/0
+      - CELERY_BROKER_URL=redis://:${REDIS_PASSWORD}@redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://:${REDIS_PASSWORD}@redis:6379/0
+      - SECRET_KEY=${SECRET_KEY}
+      - ENVIRONMENT=production
+      - MAGPIE_LICENSE_KEY=${MAGPIE_LICENSE_KEY}
+      - MAGPIE_LICENSE_SERVER=${MAGPIE_LICENSE_SERVER}
+    networks:
+      - magpie-network
+
+  # Next.js Frontend
+  frontend:
+    image: ghcr.io/magpie-so/product/frontend:${MAGPIE_VERSION:-latest}
+    container_name: magpie-frontend
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_healthy
+    environment:
+      - NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL:-}
+    expose:
+      - "3000"
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:3000"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    networks:
+      - magpie-network
+
+  # Nginx Reverse Proxy
+  nginx:
+    image: nginx:alpine
+    container_name: magpie-nginx
+    restart: unless-stopped
+    depends_on:
+      - api
+      - frontend
+    ports:
+      - "${HTTP_PORT:-80}:80"
+      - "${HTTPS_PORT:-443}:443"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./ssl:/etc/nginx/ssl:ro
+      - nginx_cache:/var/cache/nginx
+    networks:
+      - magpie-network
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+volumes:
+  postgres_data:
+    driver: local
+  redis_data:
+    driver: local
+  model_cache:
+    driver: local
+  app_data:
+    driver: local
+  nginx_cache:
+    driver: local
+
+networks:
+  magpie-network:
+    driver: bridge
