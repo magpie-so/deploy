@@ -52,8 +52,11 @@ services:
     networks:
       - magpie-network
 
-  # vLLM Inference Server (GPU-enabled)
+  # vLLM Inference Server (GPU-enabled, local only)
+  # Only started when running with: docker compose --profile local-gpu up
+  # Skip this when using a remote LLM (RunPod, etc.) — set VLLM_URL in .env instead.
   llm:
+    profiles: ["local-gpu"]
     build:
       context: ./llm
       dockerfile: Dockerfile
@@ -98,7 +101,7 @@ services:
     environment:
       - DATABASE_URL=postgresql://${POSTGRES_USER:-magpie}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-magpie}
       - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379/0
-      - VLLM_URL=http://llm:1234
+      - VLLM_URL=${VLLM_URL:-http://llm:1234}
       - VLLM_MODEL=${VLLM_MODEL:-qwen3-1.7b}
       - SECRET_KEY=${SECRET_KEY}
       - JWT_SECRET_KEY=${JWT_SECRET_KEY}
@@ -141,7 +144,7 @@ services:
       - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379/0
       - CELERY_BROKER_URL=redis://:${REDIS_PASSWORD}@redis:6379/0
       - CELERY_RESULT_BACKEND=redis://:${REDIS_PASSWORD}@redis:6379/0
-      - VLLM_URL=http://llm:1234
+      - VLLM_URL=${VLLM_URL:-http://llm:1234}
       - VLLM_MODEL=${VLLM_MODEL:-qwen3-1.7b}
       - SECRET_KEY=${SECRET_KEY}
       - JWT_SECRET_KEY=${JWT_SECRET_KEY}

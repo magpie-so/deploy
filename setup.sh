@@ -128,11 +128,19 @@ log_success "Registry authentication successful"
 log_info "Pulling application images..."
 docker compose pull
 
-log_info "Building local-only services (LLM)..."
-docker compose build llm
+# Build and start the local LLM only when explicitly requested via MAGPIE_LOCAL_LLM=true.
+# When using a remote LLM (RunPod, cloud-hosted vLLM, etc.) set VLLM_URL in .env instead.
+USE_LOCAL_LLM=$(grep "^MAGPIE_LOCAL_LLM=" .env 2>/dev/null | cut -d= -f2 || echo "false")
 
-log_info "Starting services..."
-docker compose up -d
+if [ "$USE_LOCAL_LLM" = "true" ]; then
+    log_info "Building local LLM service (GPU required)..."
+    docker compose --profile local-gpu build llm
+    log_info "Starting all services including local LLM..."
+    docker compose --profile local-gpu up -d
+else
+    log_info "Starting services (remote LLM mode — VLLM_URL from .env)..."
+    docker compose up -d
+fi
 
 # ── Wait for Health ────────────────────────────
 
