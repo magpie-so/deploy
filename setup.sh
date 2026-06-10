@@ -123,6 +123,21 @@ echo "$GHCR_TOKEN" | docker login "$GHCR_REGISTRY" -u "$GHCR_USERNAME" --passwor
 }
 log_success "Registry authentication successful"
 
+# ── SSL Certificates ───────────────────────────
+
+if [ ! -f ssl/fullchain.pem ] || [ ! -f ssl/privkey.pem ]; then
+    log_warning "No SSL certificates found in ssl/. Generating self-signed certificates for initial setup."
+    log_warning "Replace ssl/fullchain.pem and ssl/privkey.pem with real certificates before going to production."
+    mkdir -p ssl
+    openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
+        -keyout ssl/privkey.pem \
+        -out ssl/fullchain.pem \
+        -subj "/C=US/ST=Local/L=Local/O=Magpie/CN=localhost" > /dev/null 2>&1
+    log_success "Self-signed certificates generated"
+else
+    log_success "SSL certificates found"
+fi
+
 # ── Start Services ─────────────────────────────
 
 log_info "Pulling application images..."

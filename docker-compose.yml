@@ -163,7 +163,7 @@ services:
     image: ghcr.io/magpie-so/product/backend:${MAGPIE_VERSION:-latest}
     container_name: magpie-beat
     restart: unless-stopped
-    command: celery -A src.tasks.celery_app beat --loglevel=info
+    command: celery -A src.tasks.celery_app beat --loglevel=info --schedule=/tmp/celerybeat-schedule
     depends_on:
       redis:
         condition: service_healthy
